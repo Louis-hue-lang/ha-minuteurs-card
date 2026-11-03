@@ -14,7 +14,7 @@
  * - aucune animation CSS permanente ;
  * - JavaScript sans ?. ni ?? ni champs de classe, pour les WebView anciennes.
  */
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const EVENT = "esphome.kiosk_satellite_timer";
 const DEFAULT_NODE = "ks_amzn_echo_show_8";
 const DEFAULT_PRESETS = [1, 3, 5, 10, 15, 20, 30, 60];
@@ -51,6 +51,23 @@ function remaining(t, fetchedAt) {
   if (t.ends_at) return (Date.parse(t.ends_at) - Date.now()) / 1000;
   return t.seconds_left - (Date.now() - fetchedAt) / 1000;
 }
+
+// Chaque minuteur garde sa couleur tant qu'il existe, sur la carte comme sur la mini-horloge
+const PALETTE = ["#03a9f4", "#ff9800", "#8bc34a", "#e91e63", "#b388ff", "#ffeb3b"];
+const timerColors = {};
+
+function syncColors(timers) {
+  const ids = timers.map((t) => t.timer_id);
+  Object.keys(timerColors).forEach((id) => { if (ids.indexOf(id) < 0) delete timerColors[id]; });
+  timers.forEach((t) => {
+    if (timerColors[t.timer_id]) return;
+    const used = Object.keys(timerColors).map((id) => timerColors[id]);
+    const free = PALETTE.filter((c) => used.indexOf(c) < 0);
+    timerColors[t.timer_id] = free.length ? free[0] : PALETTE[ids.indexOf(t.timer_id) % PALETTE.length];
+  });
+}
+
+function timerColor(id) { return timerColors[id] || PALETTE[0]; }
 
 function presetLabel(min) {
   return min % 60 === 0 ? min / 60 + " h" : min + " min";
@@ -171,6 +188,7 @@ class MinuteursCard extends HTMLElement {
         const r = res && res.response;
         this._timers = (r && r.timers) || [];
         this._fetchedAt = Date.now();
+        syncColors(this._timers);
         this._error = "";
       })
       .catch((err) => {
@@ -299,7 +317,7 @@ class MinuteursCard extends HTMLElement {
     const ts = this._timers.slice().sort((a, b) =>
       (b.finished - a.finished) || (this._remaining(a) - this._remaining(b)));
     // Reconstruire le DOM seulement si l'ensemble des minuteurs ou leur état change
-    const key = ts.map((t) => [t.timer_id, t.name, t.total_seconds, t.is_active, t.finished].join("~")).join("|");
+    const key = ts.map((t) => [t.timer_id, t.name, t.total_seconds, t.is_active, t.finished, timerColor(t.timer_id)].join("~")).join("|");
     if (key !== this._listKey) {
       this._listKey = key;
       if (!ts.length) {
@@ -328,7 +346,7 @@ class MinuteursCard extends HTMLElement {
     return `<div class="timer ${state}" data-id="${id}">
       <svg class="ring" viewBox="0 0 60 60" aria-hidden="true">
         <circle class="track" cx="30" cy="30" r="26"/>
-        <circle class="arc" cx="30" cy="30" r="26" stroke-dasharray="${RING.toFixed(2)}"/>
+        <circle class="arc" cx="30" cy="30" r="26" stroke-dasharray="${RING.toFixed(2)}" style="stroke:${timerColor(t.timer_id)}"/>
       </svg>
       <div class="info">
         <div class="name">${esc(t.name || label(t.total_seconds))}</div>
@@ -387,7 +405,7 @@ const STYLE = `
   .ring circle { fill: none; stroke-width: 6; }
   .ring .track { stroke: var(--divider-color, rgba(127,127,127,.3)); }
   .ring .arc { stroke: var(--primary-color); stroke-linecap: round; }
-  .paused .ring .arc { stroke: var(--warning-color, #ff9800); }
+  .paused .ring .arc { opacity: .4; }
   .done .ring .track { stroke: var(--error-color, #db4437); }
   .info { flex: 1 1 auto; min-width: 0; }
   .name { font-size: 15px; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -455,8 +473,9 @@ const STYLE = `
 /*
  * Mini-horloge flottante : remplace la grosse pastille de Kiosk Satellite (à couper dans
  * l'app : Voice Satellite > Minuteurs > Show timer pills). Elle suit toutes les vues du
- * dashboard du Show, montre le minuteur le plus proche et, touchée, s'ouvre 3 s pour
- * afficher le temps exact. Touchée pendant une alarme, elle la fait taire.
+ * dashboard du Show. Chaque minuteur y est un anneau de sa couleur qui se vide, les uns
+ * dans les autres : le plus court au centre, le plus long à l'extérieur. Touchée, elle
+ * s'ouvre 3 s pour afficher le temps exact. Touchée pendant une alarme, elle la fait taire.
  * Indépendante des cartes : elle prend la connexion de l'élément <home-assistant>.
  */
 const FLOAT_PATH = "/echo-show"; // seulement sur le dashboard du Show
@@ -504,6 +523,7 @@ class MinuteursFloat {
       .then((res) => {
         this._timers = (res && res.response && res.response.timers) || [];
         this._fetchedAt = Date.now();
+        syncColors(this._timers);
       })
       .catch(() => { this._timers = []; })
       .then(() => { this._fetching = false; this.update(); });
@@ -531,13 +551,7 @@ class MinuteursFloat {
     const root = host.attachShadow({ mode: "open" });
     root.innerHTML = `<style>${FLOAT_STYLE}</style>
       <button class="fab" aria-label="Minuteur">
-        <span class="clock">
-          <svg viewBox="0 0 40 40" aria-hidden="true">
-            <circle class="track" cx="20" cy="20" r="17"/>
-            <circle class="arc" cx="20" cy="20" r="17" stroke-dasharray="${FLOAT_RING.toFixed(2)}"/>
-          </svg>
-          <span class="hand"></span><span class="pin"></span>
-        </span>
+        <span class="clock"><svg viewBox="0 0 40 40" aria-hidden="true"></svg></span>
         <span class="badge" hidden></span>
         <span class="detail"></span>
       </button>`;
@@ -563,57 +577,69 @@ class MinuteursFloat {
     this._paint();
   }
 
-  // N'écrit que ce qui change : aiguille, arc, textes du détail
+  // Les anneaux ne sont redessinés que si les minuteurs, leur ordre ou leur état changent ;
+  // ensuite seul l'arc de chacun et les textes du détail sont mis à jour
   _paint() {
     if (!this._el || this._el.hidden) return;
-    const ts = this._sorted(), t = ts[0], f = this._fetchedAt;
-    if (!t) return;
-    const left = remaining(t, f);
-    if (t.is_active && !t.finished && left <= 0) this._fetch(); // l'alarme sonne
+    const all = this._sorted(), f = this._fetchedAt;
+    if (!all.length) return;
     const root = this._el.shadowRoot;
-    const state = t.finished ? "done" : t.is_active ? "run" : "paused";
+    const state = all.some((t) => t.finished) ? "done" : all.some((t) => t.is_active) ? "run" : "paused";
     if (this._fab.dataset.state !== state) this._fab.dataset.state = state;
-    // L'aiguille avance d'un cran par seconde, comme une trotteuse
-    const angle = Math.round(t.total_seconds - left) * 6;
-    const hand = root.querySelector(".hand");
-    const rot = "rotate(" + angle + "deg)";
-    if (hand.style.transform !== rot) hand.style.transform = rot;
-    const frac = t.total_seconds ? Math.min(1, Math.max(0, left / t.total_seconds)) : 0;
-    const off = (FLOAT_RING * (1 - frac)).toFixed(1);
-    const arc = root.querySelector(".arc");
-    if (arc.getAttribute("stroke-dashoffset") !== off) arc.setAttribute("stroke-dashoffset", off);
+    if (all.some((t) => t.is_active && !t.finished && remaining(t, f) <= 0)) this._fetch(); // l'alarme sonne
+    // Le plus court au centre : tri par temps restant
+    const rings = all.slice().sort((a, b) => remaining(a, f) - remaining(b, f)).slice(0, FLOAT_MAX_RINGS);
+    const key = rings.map((t) => [t.timer_id, t.is_active, t.finished, timerColor(t.timer_id)].join("~")).join("|");
+    const svg = root.querySelector("svg");
+    if (key !== this._key) {
+      this._key = key;
+      const n = rings.length;
+      const step = n > 1 ? Math.min(5, (FLOAT_R - FLOAT_R_MIN) / (n - 1)) : 0;
+      const width = n > 1 ? 3 : 3.5;
+      svg.innerHTML = rings.map((t, i) => {
+        const r = FLOAT_R - (n - 1 - i) * step, c = (2 * Math.PI * r).toFixed(2);
+        const cls = t.finished ? "done" : t.is_active ? "" : "paused";
+        return `<circle class="track" cx="20" cy="20" r="${r}" stroke-width="${width}"/>` +
+          `<circle class="arc ${cls}" data-id="${esc(t.timer_id)}" data-c="${c}" cx="20" cy="20" r="${r}" stroke-width="${width}" ` +
+          `stroke-dasharray="${c}" style="stroke:${timerColor(t.timer_id)}"/>`;
+      }).join("");
+    }
+    svg.querySelectorAll(".arc").forEach((arc) => {
+      const t = rings.find((x) => x.timer_id === arc.dataset.id);
+      if (!t) return;
+      const frac = t.total_seconds ? Math.min(1, Math.max(0, remaining(t, f) / t.total_seconds)) : 0;
+      const off = (Number(arc.dataset.c) * (1 - frac)).toFixed(1);
+      if (arc.getAttribute("stroke-dashoffset") !== off) arc.setAttribute("stroke-dashoffset", off);
+    });
     const badge = root.querySelector(".badge");
-    badge.hidden = ts.length < 2;
-    if (badge.textContent !== String(ts.length)) badge.textContent = String(ts.length);
+    badge.hidden = all.length <= FLOAT_MAX_RINGS;
+    if (badge.textContent !== String(all.length)) badge.textContent = String(all.length);
     if (!this._fab.classList.contains("open")) return;
-    const html = ts.slice(0, 3).map((x) =>
-      `<span class="line"><span class="n">${esc(x.name || label(x.total_seconds))}</span>` +
+    const html = rings.map((x) =>
+      `<span class="line"><span class="dot" style="background:${timerColor(x.timer_id)}"></span>` +
+      `<span class="n">${esc(x.name || label(x.total_seconds))}</span>` +
       `<span class="t">${x.finished ? "Terminé" : clock(remaining(x, f)) + (x.is_active ? "" : " ❚❚")}</span></span>`).join("");
     const detail = root.querySelector(".detail");
     if (detail.innerHTML !== html) detail.innerHTML = html;
   }
 }
 
-const FLOAT_RING = 2 * Math.PI * 17;
+const FLOAT_R = 17, FLOAT_R_MIN = 4, FLOAT_MAX_RINGS = 4;
 
 const FLOAT_STYLE = `
   :host { position: fixed; top: 10px; right: 10px; z-index: 9; }
   :host([hidden]) { display: none; }
-  .fab { display: flex; align-items: center; gap: 0; height: 52px; padding: 0 6px; border: none; border-radius: 26px;
+  .fab { display: flex; align-items: center; gap: 0; min-height: 52px; padding: 6px; border: none; border-radius: 26px;
     background: rgba(20, 20, 20, .82); color: #fff; font: 500 16px Roboto, system-ui, sans-serif; cursor: pointer;
     box-shadow: 0 2px 8px rgba(0, 0, 0, .35); -webkit-tap-highlight-color: transparent; position: relative; }
   .clock { position: relative; width: 40px; height: 40px; flex: none; }
   .clock svg { width: 40px; height: 40px; transform: rotate(-90deg); }
-  .clock circle { fill: none; stroke-width: 3.5; }
-  .track { stroke: rgba(255, 255, 255, .18); }
-  .arc { stroke: var(--primary-color, #03a9f4); stroke-linecap: round; transition: stroke-dashoffset .4s linear; }
-  .hand { position: absolute; left: 19px; top: 8px; width: 2px; height: 12px; border-radius: 1px; background: #fff;
-    transform-origin: 1px 12px; transition: transform .35s cubic-bezier(.4, 2, .6, 1); }
-  .pin { position: absolute; left: 17.5px; top: 17.5px; width: 5px; height: 5px; border-radius: 50%; background: #fff; }
-  [data-state="paused"] .arc { stroke: var(--warning-color, #ff9800); }
-  [data-state="paused"] .hand { background: var(--warning-color, #ff9800); }
+  .clock circle { fill: none; }
+  .track { stroke: rgba(255, 255, 255, .14); }
+  .arc { stroke-linecap: round; transition: stroke-dashoffset .4s linear; }
+  .arc.paused { opacity: .4; }
   [data-state="done"] { background: var(--error-color, #db4437); animation: sonne .5s ease-in-out infinite alternate; }
-  [data-state="done"] .arc { stroke: #fff; }
+  .arc.done { stroke: #fff !important; }
   @keyframes sonne { from { transform: rotate(-8deg); } to { transform: rotate(8deg); } }
   .badge { position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px; box-sizing: border-box;
     border-radius: 9px; background: var(--primary-color, #03a9f4); font-size: 12px; line-height: 18px; text-align: center; }
@@ -621,9 +647,10 @@ const FLOAT_STYLE = `
   .detail { display: flex; flex-direction: column; justify-content: center; max-width: 0; overflow: hidden; white-space: nowrap;
     opacity: 0; transition: max-width .3s ease, opacity .2s ease, margin .3s ease; }
   .open .detail { max-width: 220px; opacity: 1; margin: 0 10px 0 8px; }
-  .line { display: flex; gap: 10px; justify-content: space-between; line-height: 1.15; }
+  .line { display: flex; gap: 8px; align-items: center; line-height: 1.2; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .n { font-size: 12px; font-weight: 400; opacity: .75; max-width: 110px; overflow: hidden; text-overflow: ellipsis; align-self: center; }
-  .t { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .t { font-size: 18px; font-variant-numeric: tabular-nums; margin-left: auto; }
 `;
 
 // Une seule horloge même si le module est chargé deux fois

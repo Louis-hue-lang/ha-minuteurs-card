@@ -7,7 +7,7 @@ Carte Lovelace pour retrouver et piloter les minuteurs d'une tablette [Kiosk Sat
 - alarme terminée : bouton « Arrêter » ;
 - lancement par durées rapides (1 min à 1 h) ou durée libre h : min : s, avec un nom facultatif ;
 - mode `compact` (liste seule) pour un encart sur l'accueil ;
-- mini-horloge flottante en haut à droite de toutes les vues du dashboard `/echo-show` : aiguille et anneau animés, badge s'il y a plusieurs minuteurs, orange en pause, rouge à l'alarme. Un appui l'ouvre 3 s pour lire le temps exact. Pendant une alarme, un appui la fait taire. Elle s'efface sur la vue où la carte complète est affichée.
+- mini-horloge flottante en haut à droite de toutes les vues du dashboard `/echo-show` : un cercle qui se vide par minuteur, chacun de sa couleur, imbriqués du plus court (au centre) au plus long (à l'extérieur), jusqu'à 4 ; pâli en pause, fond rouge à l'alarme. Un appui l'ouvre 3 s pour lire le temps exact. Pendant une alarme, un appui la fait taire. Elle s'efface sur la vue où la carte complète est affichée.
 
 Pour ne pas doubler la mini-horloge, couper la grosse pastille de Kiosk Satellite : réglages Voice Satellite → Minuteurs → « Show timer pills ».
 
