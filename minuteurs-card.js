@@ -14,7 +14,7 @@
  * - aucune animation CSS permanente ;
  * - JavaScript sans ?. ni ?? ni champs de classe, pour les WebView anciennes.
  */
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const EVENT = "esphome.kiosk_satellite_timer";
 const DEFAULT_NODE = "ks_amzn_echo_show_8";
 const DEFAULT_PRESETS = [1, 3, 5, 10, 15, 20, 30, 60];
@@ -42,6 +42,14 @@ function label(sec) {
   if (h) return h + " h" + (m ? " " + pad(m) : "");
   if (m) return m + " min" + (s ? " " + s + " s" : "");
   return s + " s";
+}
+
+// Secondes restantes, à partir de la dernière liste reçue
+function remaining(t, fetchedAt) {
+  if (t.finished) return 0;
+  if (!t.is_active) return t.seconds_left;
+  if (t.ends_at) return (Date.parse(t.ends_at) - Date.now()) / 1000;
+  return t.seconds_left - (Date.now() - fetchedAt) / 1000;
 }
 
 function presetLabel(min) {
@@ -110,6 +118,10 @@ class MinuteursCard extends HTMLElement {
   }
 
   connectedCallback() {
+    // La mini-horloge s'efface quand la carte complète est à l'écran
+    this._full = !!(this._config && !this._config.compact);
+    if (this._full) floating.fullCards++;
+    floating.update();
     if (this._hass) {
       this._subscribe();
       this._fetch();
@@ -117,6 +129,9 @@ class MinuteursCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    if (this._full) floating.fullCards--;
+    this._full = false;
+    floating.update();
     if (this._unsub) {
       this._unsub.then((u) => u()).catch(() => {});
       this._unsub = null;
@@ -169,12 +184,7 @@ class MinuteursCard extends HTMLElement {
     return this._fetching;
   }
 
-  _remaining(t) {
-    if (t.finished) return 0;
-    if (!t.is_active) return t.seconds_left;
-    if (t.ends_at) return (Date.parse(t.ends_at) - Date.now()) / 1000;
-    return t.seconds_left - (Date.now() - this._fetchedAt) / 1000;
-  }
+  _remaining(t) { return remaining(t, this._fetchedAt); }
 
   _act(promise) {
     this._error = "";
@@ -415,6 +425,183 @@ const STYLE = `
   .compact .ring { width: 44px; height: 44px; }
   .compact .time { font-size: 26px; }
 `;
+
+/*
+ * Mini-horloge flottante : remplace la grosse pastille de Kiosk Satellite (à couper dans
+ * l'app : Voice Satellite > Minuteurs > Show timer pills). Elle suit toutes les vues du
+ * dashboard du Show, montre le minuteur le plus proche et, touchée, s'ouvre 3 s pour
+ * afficher le temps exact. Touchée pendant une alarme, elle la fait taire.
+ * Indépendante des cartes : elle prend la connexion de l'élément <home-assistant>.
+ */
+const FLOAT_PATH = "/echo-show"; // seulement sur le dashboard du Show
+const FLOAT_OPEN_MS = 3000;
+
+class MinuteursFloat {
+  constructor() {
+    this.fullCards = 0;
+    this._timers = [];
+    this._fetchedAt = 0;
+    this._conn = null;
+    this._el = null;
+    this._tick = null;
+    this._resync = null;
+    this._close = null;
+    this._fetching = false;
+    this._key = null;
+    this._wait = setInterval(() => this._attach(), 1000);
+    const onNav = () => this.update();
+    window.addEventListener("location-changed", onNav);
+    window.addEventListener("popstate", onNav);
+  }
+
+  _attach() {
+    const ha = document.querySelector("home-assistant");
+    const conn = ha && ha.hass && ha.hass.connection;
+    if (!conn || !document.body) return;
+    clearInterval(this._wait);
+    this._conn = conn;
+    conn.subscribeEvents(() => this._fetch(), EVENT).catch(() => {});
+    conn.addEventListener("ready", () => this._fetch()); // reconnexion après coupure
+    this._fetch();
+  }
+
+  _call(service, withResponse) {
+    const msg = { type: "call_service", domain: "esphome", service: DEFAULT_NODE + "_" + service, service_data: {} };
+    if (withResponse) msg.return_response = true;
+    return this._conn.sendMessagePromise(msg);
+  }
+
+  _fetch() {
+    if (!this._conn || this._fetching) return;
+    this._fetching = true;
+    this._call("vs_list_timers", true)
+      .then((res) => {
+        this._timers = (res && res.response && res.response.timers) || [];
+        this._fetchedAt = Date.now();
+      })
+      .catch(() => { this._timers = []; })
+      .then(() => { this._fetching = false; this.update(); });
+  }
+
+  _visible() {
+    return this._timers.length > 0 && this.fullCards <= 0 && location.pathname.indexOf(FLOAT_PATH) === 0;
+  }
+
+  update() {
+    const show = this._visible();
+    if (show && !this._el) this._build();
+    if (this._el) this._el.hidden = !show;
+    const running = show && this._timers.some((t) => t.is_active && !t.finished);
+    if (running && !this._tick) this._tick = setInterval(() => this._paint(), 1000);
+    if (!running && this._tick) { clearInterval(this._tick); this._tick = null; }
+    if (this._timers.length && !this._resync) this._resync = setInterval(() => this._fetch(), RESYNC_MS);
+    if (!this._timers.length && this._resync) { clearInterval(this._resync); this._resync = null; }
+    if (show) this._paint();
+  }
+
+  _build() {
+    const host = document.createElement("div");
+    host.id = "minuteurs-float";
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `<style>${FLOAT_STYLE}</style>
+      <button class="fab" aria-label="Minuteur">
+        <span class="clock">
+          <svg viewBox="0 0 40 40" aria-hidden="true">
+            <circle class="track" cx="20" cy="20" r="17"/>
+            <circle class="arc" cx="20" cy="20" r="17" stroke-dasharray="${FLOAT_RING.toFixed(2)}"/>
+          </svg>
+          <span class="hand"></span><span class="pin"></span>
+        </span>
+        <span class="badge" hidden></span>
+        <span class="detail"></span>
+      </button>`;
+    this._fab = root.querySelector(".fab");
+    this._fab.addEventListener("click", () => this._onTap());
+    document.body.appendChild(host);
+    this._el = host;
+  }
+
+  _sorted() {
+    const f = this._fetchedAt;
+    return this._timers.slice().sort((a, b) => (b.finished - a.finished) || (remaining(a, f) - remaining(b, f)));
+  }
+
+  _onTap() {
+    if (this._timers.some((t) => t.finished)) {
+      this._call("vs_cancel", false).catch(() => {}).then(() => this._fetch());
+      return;
+    }
+    this._fab.classList.add("open");
+    clearTimeout(this._close);
+    this._close = setTimeout(() => this._fab.classList.remove("open"), FLOAT_OPEN_MS);
+    this._paint();
+  }
+
+  // N'écrit que ce qui change : aiguille, arc, textes du détail
+  _paint() {
+    if (!this._el || this._el.hidden) return;
+    const ts = this._sorted(), t = ts[0], f = this._fetchedAt;
+    if (!t) return;
+    const left = remaining(t, f);
+    if (t.is_active && !t.finished && left <= 0) this._fetch(); // l'alarme sonne
+    const root = this._el.shadowRoot;
+    const state = t.finished ? "done" : t.is_active ? "run" : "paused";
+    if (this._fab.dataset.state !== state) this._fab.dataset.state = state;
+    // L'aiguille avance d'un cran par seconde, comme une trotteuse
+    const angle = Math.round(t.total_seconds - left) * 6;
+    const hand = root.querySelector(".hand");
+    const rot = "rotate(" + angle + "deg)";
+    if (hand.style.transform !== rot) hand.style.transform = rot;
+    const frac = t.total_seconds ? Math.min(1, Math.max(0, left / t.total_seconds)) : 0;
+    const off = (FLOAT_RING * (1 - frac)).toFixed(1);
+    const arc = root.querySelector(".arc");
+    if (arc.getAttribute("stroke-dashoffset") !== off) arc.setAttribute("stroke-dashoffset", off);
+    const badge = root.querySelector(".badge");
+    badge.hidden = ts.length < 2;
+    if (badge.textContent !== String(ts.length)) badge.textContent = String(ts.length);
+    if (!this._fab.classList.contains("open")) return;
+    const html = ts.slice(0, 3).map((x) =>
+      `<span class="line"><span class="n">${esc(x.name || label(x.total_seconds))}</span>` +
+      `<span class="t">${x.finished ? "Terminé" : clock(remaining(x, f)) + (x.is_active ? "" : " ❚❚")}</span></span>`).join("");
+    const detail = root.querySelector(".detail");
+    if (detail.innerHTML !== html) detail.innerHTML = html;
+  }
+}
+
+const FLOAT_RING = 2 * Math.PI * 17;
+
+const FLOAT_STYLE = `
+  :host { position: fixed; top: 10px; right: 10px; z-index: 9; }
+  :host([hidden]) { display: none; }
+  .fab { display: flex; align-items: center; gap: 0; height: 52px; padding: 0 6px; border: none; border-radius: 26px;
+    background: rgba(20, 20, 20, .82); color: #fff; font: 500 16px Roboto, system-ui, sans-serif; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .35); -webkit-tap-highlight-color: transparent; position: relative; }
+  .clock { position: relative; width: 40px; height: 40px; flex: none; }
+  .clock svg { width: 40px; height: 40px; transform: rotate(-90deg); }
+  .clock circle { fill: none; stroke-width: 3.5; }
+  .track { stroke: rgba(255, 255, 255, .18); }
+  .arc { stroke: var(--primary-color, #03a9f4); stroke-linecap: round; transition: stroke-dashoffset .4s linear; }
+  .hand { position: absolute; left: 19px; top: 8px; width: 2px; height: 12px; border-radius: 1px; background: #fff;
+    transform-origin: 1px 12px; transition: transform .35s cubic-bezier(.4, 2, .6, 1); }
+  .pin { position: absolute; left: 17.5px; top: 17.5px; width: 5px; height: 5px; border-radius: 50%; background: #fff; }
+  [data-state="paused"] .arc { stroke: var(--warning-color, #ff9800); }
+  [data-state="paused"] .hand { background: var(--warning-color, #ff9800); }
+  [data-state="done"] { background: var(--error-color, #db4437); animation: sonne .5s ease-in-out infinite alternate; }
+  [data-state="done"] .arc { stroke: #fff; }
+  @keyframes sonne { from { transform: rotate(-8deg); } to { transform: rotate(8deg); } }
+  .badge { position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px; box-sizing: border-box;
+    border-radius: 9px; background: var(--primary-color, #03a9f4); font-size: 12px; line-height: 18px; text-align: center; }
+  .badge[hidden] { display: none; }
+  .detail { display: flex; flex-direction: column; justify-content: center; max-width: 0; overflow: hidden; white-space: nowrap;
+    opacity: 0; transition: max-width .3s ease, opacity .2s ease, margin .3s ease; }
+  .open .detail { max-width: 220px; opacity: 1; margin: 0 10px 0 8px; }
+  .line { display: flex; gap: 10px; justify-content: space-between; line-height: 1.15; }
+  .n { font-size: 12px; font-weight: 400; opacity: .75; max-width: 110px; overflow: hidden; text-overflow: ellipsis; align-self: center; }
+  .t { font-size: 18px; font-variant-numeric: tabular-nums; }
+`;
+
+// Une seule horloge même si le module est chargé deux fois
+const floating = window.minuteursFloat || (window.minuteursFloat = new MinuteursFloat());
 
 if (!customElements.get("minuteurs-card")) {
   customElements.define("minuteurs-card", MinuteursCard);
