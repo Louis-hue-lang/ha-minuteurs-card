@@ -14,7 +14,7 @@
  * - aucune animation CSS permanente ;
  * - JavaScript sans ?. ni ?? ni champs de classe, pour les WebView anciennes.
  */
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const EVENT = "esphome.kiosk_satellite_timer";
 const DEFAULT_NODE = "ks_amzn_echo_show_8";
 const DEFAULT_PRESETS = [1, 3, 5, 10, 15, 20, 30, 60];
@@ -62,6 +62,7 @@ const ICONS = {
   close: "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z",
   bell: "M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21",
   minus: "M19,13H5V11H19V13Z",
+  timer: "M12,20A7,7 0 0,1 5,13A7,7 0 0,1 12,6A7,7 0 0,1 19,13A7,7 0 0,1 12,20M19.03,7.39L20.45,5.97C20,5.46 19.55,5 19.04,4.56L17.62,6C16.07,4.74 14.12,4 12,4A9,9 0 0,0 3,13A9,9 0 0,0 12,22C17,22 21,17.97 21,13C21,10.88 20.26,8.93 19.03,7.39M11,14H13V8H11M15,1H9V3H15V1Z",
   plus: "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z",
 };
 
@@ -247,7 +248,7 @@ class MinuteursCard extends HTMLElement {
     if (!this._config || !this._hass) return;
     const c = this._config;
     if (!this._rendered) {
-      this.shadowRoot.innerHTML = `<style>${STYLE}</style><ha-card class="${c.compact ? "compact" : ""}">
+      this.shadowRoot.innerHTML = `<style>${STYLE}</style><ha-card class="${c.compact ? "compact" : "full"}">
         ${c.title ? `<div class="title">${esc(c.title)}</div>` : ""}
         <div class="body">
           <div class="list"></div>
@@ -303,7 +304,9 @@ class MinuteursCard extends HTMLElement {
       this._listKey = key;
       if (!ts.length) {
         list.innerHTML = this._loaded
-          ? `<div class="empty">Aucun minuteur. ${this._config.compact ? "" : "Dites « Alexa, minuteur 10 minutes » ou choisissez une durée."}</div>`
+          ? (this._config.compact
+            ? `<div class="empty">Aucun minuteur.</div>`
+            : `<div class="empty">${icon("timer")}<div>Aucun minuteur</div><div class="hint">Dites « Alexa, minuteur 10 minutes » ou choisissez une durée.</div></div>`)
           : "";
       } else {
         list.innerHTML = ts.map((t) => this._timerHtml(t)).join("");
@@ -370,7 +373,7 @@ class MinuteursCard extends HTMLElement {
 }
 
 const STYLE = `
-  :host { display: block; }
+  :host { display: block; height: 100%; }
   ha-card { padding: 16px; box-sizing: border-box; height: 100%; }
   .title { font-size: 22px; font-weight: 500; margin: 0 0 12px; color: var(--primary-text-color); }
   .body { display: flex; gap: 24px; align-items: flex-start; }
@@ -420,6 +423,29 @@ const STYLE = `
     border: 1px solid var(--divider-color, rgba(127,127,127,.3)); background: transparent;
     color: var(--primary-text-color); font: inherit; font-size: 16px; }
   .error { margin-top: 10px; color: var(--error-color, #db4437); font-size: 14px; }
+  /* Carte complète : remplit la vue panneau et grossit pour le doigt */
+  ha-card.full { display: flex; flex-direction: column; min-height: 100%; }
+  .full .body { flex: 1 1 auto; align-items: stretch; }
+  .full .new { display: flex; flex-direction: column; flex-basis: 380px; }
+  .full .presets { flex: 1 1 auto; grid-auto-rows: 1fr; gap: 10px; }
+  .full .chip { height: auto; min-height: 52px; border-radius: 18px; font-size: 20px; }
+  .full .custom { margin: 18px 0 14px; gap: 10px; }
+  .full .unit .round { width: 56px; height: 48px; border-radius: 24px; }
+  .full .val { font-size: 44px; }
+  .full .sep { font-size: 36px; padding-bottom: 22px; }
+  .full .go input, .full .primary { height: 56px; border-radius: 28px; font-size: 18px; }
+  .full .list { gap: 12px; }
+  .full .timer { padding: 14px 16px; gap: 18px; border-radius: 20px; }
+  .full .ring { width: 76px; height: 76px; }
+  .full .name { font-size: 17px; }
+  .full .time { font-size: 46px; }
+  .full .round { width: 54px; height: 54px; font-size: 18px; }
+  .full .round.big { width: 64px; height: 64px; }
+  .full .empty { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; text-align: center; font-size: 22px; padding: 0 16px; }
+  .full .empty svg { width: 96px; height: 96px; fill: currentColor; opacity: .35; }
+  .full .empty .hint { font-size: 16px; opacity: .8; max-width: 380px; }
+  @media (max-width: 760px) { .full .presets { flex: none; } }
   .compact .title { font-size: 18px; margin-bottom: 8px; }
   .compact .timer { padding: 8px 10px; gap: 10px; }
   .compact .ring { width: 44px; height: 44px; }
